@@ -9,8 +9,8 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import statsmodels.api as sm
 
-START_DATE = '1995-01-01'
-END_DATE   = '2007-12-31'
+START_DATE = '2018-01-02'
+END_DATE   = '2025-12-31'
 
 print('Libraries loaded.')
 
@@ -19,242 +19,59 @@ print('Libraries loaded.')
 # =============================================================================
 
 # --- Stock prices ---
-stock_df = pd.read_csv('sp500_adjclose.csv', index_col='Date', parse_dates=True)
+stock_df = pd.read_csv('vietnam_stocks_price.csv', index_col= 0, parse_dates=True)
 print(f'Adj Close  shape: {stock_df.shape}')
 print(f'Date range: {stock_df.index.min().date()} -> {stock_df.index.max().date()}')
 
-# --- ETF prices ---
-etf_df = pd.read_csv('sector_etfs_adjclose.csv', index_col='Date', parse_dates=True)
-print(f'ETF shape: {etf_df.shape}')
-print(f'Date range: {etf_df.index.min().date()} -> {etf_df.index.max().date()}')
+# --- Stock volumes ---
+volume_df = pd.read_csv('vietnam_stocks_volume.csv', index_col= 0, parse_dates=True)
+print(f'Volume shape: {volume_df.shape}')
 
-# --- Market cap ---
-mktcap_df = pd.read_csv('market_cap_daily.csv', index_col='Date', parse_dates=True)
-print(f'Market cap shape: {mktcap_df.shape}')
+# --- FU VN30 ---
+fu_price_df = pd.read_csv('fu_vn30_price.csv', index_col=0, parse_dates=True)
+print(f'FU VN30 shape: {fu_price_df.shape}')
 
-# --- Sector mapping (from cache) ---
-stock_map_etf = pd.read_csv("sector_mapping.csv")
-print(stock_map_etf.head())
-
-# --- SPY returns ---
-spy_returns = pd.read_csv('spy_returns_1996_2007.csv')
-spy_returns = spy_returns.set_index('Date')
-spy_returns.index = pd.to_datetime(spy_returns.index)
-
-# =============================================================================
-# 2. CHECK DATA QUALITY
-# =============================================================================
-
-null_count = stock_df.isna().sum()
-null_pct   = stock_df.isna().mean() * 100
-zero_count = (stock_df == 0).sum()
-neg_count  = (stock_df < 0).sum()
-
-print(f'\nTotal trading days: {len(stock_df)}')
-print(f'Stocks with >50% missing: {(null_pct > 50).sum()}')
-print(f'Stocks with >20% missing: {(null_pct > 20).sum()}')
-print(f'Stocks with >5% missing: {(null_pct > 5).sum()}')
-print(f'Stocks fully empty (100% null): {(null_pct == 100).sum()}')
-print(f'Any negative prices: {(neg_count > 0).sum()} tickers')
-print(f'Any zero prices: {(zero_count > 0).sum()} tickers')
-
-stock_qc = pd.DataFrame({
-    'null_days':  null_count,
-    'null_pct':   null_pct.round(1),
-    'zero_price': zero_count,
-    'neg_price':  neg_count,
-}).sort_values('null_pct', ascending=False)
-print(stock_qc.head(10))
-
-# --- Missing per day plot ---
-missing_per_day = stock_df.isna().sum(axis=1)
-plt.plot(missing_per_day.index, missing_per_day.values, linewidth=0.7, color='tomato')
-plt.title('# Tickers with Missing Price per Day')
-plt.xlabel('Date')
-plt.ylabel('# Tickers')
-plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
-plt.tight_layout()
-plt.show()
-
-# --- ETF quality ---
-etf_summary = []
-for etf in etf_df.columns:
-    etf_summary.append({
-        'ticker':      etf,
-        'rows':        len(etf_df[etf].dropna()),
-        'start':       etf_df[etf].first_valid_index(),
-        'end':         etf_df[etf].last_valid_index(),
-        'missing':     etf_df[etf].isna().sum(),
-        'pct_missing': etf_df[etf].isna().mean() * 100,
-        'negative':    (etf_df[etf] < 0).sum(),
-        'duplicates':  etf_df[etf].index.duplicated().sum()
-    })
-etf_summary_df = pd.DataFrame(etf_summary)
-print(etf_summary_df)
-
-# --- Market cap quality ---
-null_pct_mc = mktcap_df.isna().mean() * 100
-print(f'Shape: {mktcap_df.shape}')
-print(f'Date range: {mktcap_df.index.min().date()} -> {mktcap_df.index.max().date()}')
-print(f'\nTickers with full market cap data (0% null): {(null_pct_mc == 0).sum()}')
-print(f'Tickers completely missing: {(null_pct_mc == 100).sum()}')
-print(f'Tickers with >50% missing: {(null_pct_mc > 50).sum()}')
-print(f'Tickers with >20% missing: {(null_pct_mc > 20).sum()}')
-print(f'Tickers with >5% missing: {(null_pct_mc > 5).sum()}')
-
-# =============================================================================
-# 3. CLEAN STOCK DATA
-# =============================================================================
-
-# Drop columns with > 5% missing
-stock_cleaned = stock_df.loc[:, null_pct <= 5]
-print("Original columns:", stock_df.shape[1])
-print("Remaining columns:", stock_cleaned.shape[1])
-print("Dropped columns:", stock_df.shape[1] - stock_cleaned.shape[1])
-
-print("Total missing before:", stock_df.isna().sum().sum())
-print("Total missing after :", stock_cleaned.isna().sum().sum())
-
-# Remaining tickers with missing values
-missing_per_col = stock_cleaned.isna().sum()
-print(missing_per_col[missing_per_col > 0].sort_values(ascending=False))
-
-# Drop remaining problem tickers
-cols_to_drop = ["FCX", "WAB", "RMD", "DRI", "COR", "DLTR", "EME"]
-stock_cleaned = stock_cleaned.drop(columns=cols_to_drop, errors='ignore')
-print("Total missing before:", stock_df.isna().sum().sum())
-print("Total missing after :", stock_cleaned.isna().sum().sum())
-
-# =============================================================================
-# 4. COMPUTE RETURNS
-# =============================================================================
-
-returns_all = stock_cleaned.pct_change().dropna()
-etf_returns = etf_df.pct_change()
-
-# =============================================================================
-# 5. FILTER STOCKS BY MARKET CAP > $1B
-# =============================================================================
-
-cap_threshold = 1e9
-
-common_cols        = stock_cleaned.columns.intersection(mktcap_df.columns)
-returns_aligned    = returns_all[common_cols]
-market_cap_aligned = mktcap_df[common_cols]
-trade_mask         = market_cap_aligned.shift(1) > cap_threshold
-returns_filtered   = returns_aligned.where(trade_mask)
-
-print("Total stocks in model universe:", returns_filtered.shape[1])
-
-# =============================================================================
-# 6. SYNTHETIC ETFs
-# =============================================================================
-
-sector_map = {
-    "Internet":               "HHH",
-    "Real Estate":            "IYR",
-    "Transportation":         "IYT",
-    "Oil Exploration":        "OIH",
-    "Regional Banks":         "RKH",
-    "Retail":                 "RTH",
-    "Semiconductors":         "SMH",
-    "Utility":                "UTH",
-    "Energy":                 "XLE",
-    "Financial":              "XLF",
-    "Industrial":             "XLI",
-    "Technology":             "XLK",
-    "Consumer Staples":       "XLP",
-    "Healthcare":             "XLV",
-    "Consumer discretionary": "XLY"
-}
-
-def build_synthetic_etfs(stock_map_etf, returns, market_cap_aligned):
-    sector_returns = {}
-    for sector in stock_map_etf["Sector_Classification"].unique():
-        tickers = stock_map_etf.loc[
-            stock_map_etf["Sector_Classification"] == sector, "Ticker"
-        ]
-        tickers = [t for t in tickers if t in returns.columns]
-        if not tickers:
-            continue
-        mc      = market_cap_aligned[tickers].shift(1)
-        mc      = mc.where(mc > 1e9)
-        weights = mc.div(mc.sum(axis=1), axis=0)
-        sec_ret = (weights * returns[tickers]).sum(axis=1)
-        sector_returns[sector] = sec_ret
-    return pd.DataFrame(sector_returns)
-
-
-sector_returns = build_synthetic_etfs(
-    stock_map_etf,
-    returns=returns_filtered,
-    market_cap_aligned=market_cap_aligned
-)
-sector_returns = sector_returns.rename(columns=sector_map)
-
-print("Synthetic ETFs shape:", sector_returns.shape)
-print("Sectors:", list(sector_returns.columns))
-print(sector_returns.head())
-
-# --- Compare synthetic vs actual ETFs ---
-common_etfs = sector_returns.columns.intersection(etf_df.columns)
-print("Common ETFs:", list(common_etfs))
-for etf in common_etfs:
-    plt.figure(figsize=(10, 5))
-    plt.plot(sector_returns.index, sector_returns[etf], label=f"Synthetic {etf}", linewidth=2)
-    plt.plot(etf_returns.index, etf_returns[etf], label=f"Actual {etf}", linewidth=2, alpha=0.7)
-    plt.title(f"Synthetic vs Actual ETF: {etf}")
-    plt.xlabel("Date")
-    plt.ylabel("Return")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.show()
-
-# --- Ticker → ETF map ---
-ticker_to_etf = dict(zip(stock_map_etf["Ticker"], stock_map_etf["Sector_ETF"]))
 
 # =============================================================================
 # 7. HELPER FUNCTIONS
 # =============================================================================
 
-# --- Rolling residuals ---
-def _rolling_residuals(stock_returns, factor_returns, stock_to_factor, window=60):
-    idx            = stock_returns.index.intersection(factor_returns.index)
-    stock_returns  = stock_returns.loc[idx]
-    factor_returns = factor_returns.loc[idx]
-    n              = len(idx)
-    residuals      = pd.DataFrame(np.nan, index=idx, columns=stock_returns.columns)
-    for ticker in stock_returns.columns:
-        factor_col = stock_to_factor.get(ticker)
-        if factor_col not in factor_returns.columns:
-            continue
-        r   = stock_returns[ticker].values
-        f   = factor_returns[factor_col].values
-        res = np.full(n, np.nan)
-        for t in range(window, n):
-            r_win = r[t - window: t]
-            f_win = f[t - window: t]
-            mask  = ~(np.isnan(r_win) | np.isnan(f_win))
-            if mask.sum() < 2:
-                continue
-            X          = np.column_stack([np.ones(mask.sum()), f_win[mask]])
-            coeffs, *_ = np.linalg.lstsq(X, r_win[mask], rcond=None)
-            beta0, beta = coeffs
-            if not (np.isnan(r[t]) or np.isnan(f[t])):
-                res[t] = r[t] - beta0 - beta * f[t]
-        residuals[ticker] = res
-    return residuals
+# --- Choose trading universe ---
+def filter_universe(price_df, volume_df, date, top_n=300, window=366):
+    # filter stocks with price data on the given date
+    list_stocks_notna = price_df.loc[date].notna()
+    price = price_df.loc[(date - pd.Timedelta(days=window)):date, list_stocks_notna]
+    volume = volume_df.loc[(date - pd.Timedelta(days=window)):date, list_stocks_notna]
+    
+    # take top N stocks by liquidity 
+    liquidity = volume.iloc[-1]
+    list_top_liquidity = liquidity.nlargest(top_n).index.tolist()
+    top_liquidity = price[list_top_liquidity]
+    volume_top_liquidity = volume[list_top_liquidity]
 
-def compute_residuals_synthetic(stock_returns, sector_returns, stock_to_sector, window=60):
-    return _rolling_residuals(stock_returns, sector_returns, stock_to_sector, window)
+    # handle missing values by forward fill then drop na 
+    top_liquidity = top_liquidity.ffill(limit=2)
+    top_liquidity = top_liquidity.dropna(axis=1, how='any')
+    columns = top_liquidity.columns
+    volume_top_liquidity = volume_top_liquidity[columns]
+    volume_top_liquidity = volume_top_liquidity.ffill(limit=5)
+    
+    return top_liquidity, volume_top_liquidity
 
-def compute_residuals_actual(stock_returns, etf_returns, stock_to_etf, window=60):
-    return _rolling_residuals(stock_returns, etf_returns, stock_to_etf, window)
+# --- Returns calculation ---
+def compute_returns(price_df):
+    return price_df.pct_change().dropna()
+
+# --- Returns calculation with taking volume into account ---
+
+
+
+
 
 
 # --- OU fitting ---
-def fit_ou(residuals, window=60, kappa_min=8.4):
+# sửa lại thêm case không limit kappa 
+def fit_ou(residuals, window=60, limit = False, kappa_min=8.4):
     kappa    = pd.DataFrame(index=residuals.index, columns=residuals.columns, dtype=float)
     mu       = kappa.copy()
     sigma_eq = kappa.copy()
@@ -298,6 +115,7 @@ def fit_ou(residuals, window=60, kappa_min=8.4):
 
 
 # --- S-score ---
+# thêm hàm vẽ phân phối 
 def compute_s_score(residuals, mu, sigma_eq, window=60):
     s = pd.DataFrame(index=residuals.index, columns=residuals.columns, dtype=float)
     for t in range(window, len(residuals)):
@@ -312,6 +130,8 @@ def compute_s_score(residuals, mu, sigma_eq, window=60):
 
 
 # --- Signal generation ---
+# sửa thành còn mỗi long
+# sửa thêm điều kiện accept signal sau t+2.5 ngày  
 def generate_signals(s, s_open=1.25, s_close_long=0.50, s_close_short=0.75):
     signals = pd.DataFrame(0, index=s.index, columns=s.columns)
     current = pd.Series(0, index=s.columns)
@@ -339,6 +159,7 @@ def generate_signals(s, s_open=1.25, s_close_long=0.50, s_close_short=0.75):
 
 
 # --- Portfolio construction ---
+# sửa leverage, thay thành equal weight 
 def construct_portfolio(signals, leverage=2.0, max_positions=100):
     weights         = pd.DataFrame(0.0, index=signals.index, columns=signals.columns)
     current_weights = pd.Series(0.0, index=signals.columns)
@@ -355,76 +176,6 @@ def construct_portfolio(signals, leverage=2.0, max_positions=100):
         weights.loc[date] = new_weights
         current_weights   = new_weights
     return weights
-
-
-# --- Backtest core ---
-def backtest_core(weights_stock, weights_hedge, stock_returns, hedge_returns,
-                  initial_equity=100, slippage=0.0005):
-    common = (weights_stock.index
-              .intersection(stock_returns.index)
-              .intersection(hedge_returns.index))
-    ws = weights_stock.loc[common].fillna(0)
-    wh = weights_hedge.loc[common].fillna(0)
-    rs = stock_returns.loc[common].fillna(0)
-    rh = hedge_returns.loc[common].fillna(0)
-    equity      = pd.Series(index=common, dtype=float)
-    equity.iloc[0] = initial_equity
-    for t in range(1, len(common)):
-        E_prev    = equity.iloc[t - 1]
-        Q_stock   = E_prev * ws.iloc[t]
-        Q_hedge   = E_prev * wh.iloc[t]
-        pnl_stock = (Q_stock * rs.iloc[t]).sum()
-        pnl_hedge = (Q_hedge * rh.iloc[t]).sum()
-        if t > 1:
-            E_prev2      = equity.iloc[t - 2]
-            Q_prev_stock = E_prev2 * ws.iloc[t - 1]
-            Q_prev_hedge = E_prev2 * wh.iloc[t - 1]
-        else:
-            Q_prev_stock = pd.Series(0.0, index=ws.columns)
-            Q_prev_hedge = pd.Series(0.0, index=wh.columns)
-        cost = ((Q_stock - Q_prev_stock).abs().sum() +
-                (Q_hedge - Q_prev_hedge).abs().sum()) * slippage
-        equity.iloc[t] = E_prev + pnl_stock + pnl_hedge - cost
-    return equity
-
-
-def backtest_synthetic(weights, stock_returns, spy_returns,
-                       window=60, initial_equity=100, slippage=0.0005):
-    if isinstance(spy_returns, pd.DataFrame):
-        spy_returns = spy_returns.iloc[:, 0]
-    common        = (weights.index
-                     .intersection(stock_returns.index)
-                     .intersection(spy_returns.index))
-    weights       = weights.loc[common].fillna(0)
-    stock_returns = stock_returns.loc[common].fillna(0)
-    spy_returns   = spy_returns.loc[common].fillna(0)
-    port_ret      = (weights * stock_returns).sum(axis=1)
-    cov           = port_ret.rolling(window).cov(spy_returns)
-    var           = spy_returns.rolling(window).var().replace(0, np.nan)
-    beta          = (cov / var).fillna(0)
-    hedge_weights = pd.DataFrame(-beta.values, index=common, columns=["SPY"])
-    hedge_returns = pd.DataFrame(spy_returns.values, index=common, columns=["SPY"])
-    return backtest_core(weights, hedge_weights, stock_returns, hedge_returns,
-                         initial_equity, slippage)
-
-
-def compute_industry_hedge(weights, stock_to_etf):
-    etf_map = pd.Series(stock_to_etf).reindex(weights.columns)
-    return weights.T.groupby(etf_map).sum().T * -1
-
-
-def backtest_actual(weights, stock_returns, etf_returns, stock_to_etf,
-                    initial_equity=100, slippage=0.0005):
-    common        = (weights.index
-                     .intersection(stock_returns.index)
-                     .intersection(etf_returns.index))
-    weights       = weights.loc[common].fillna(0)
-    stock_returns = stock_returns.loc[common].fillna(0)
-    etf_returns   = etf_returns.loc[common].fillna(0)
-    hedge_weights = compute_industry_hedge(weights, stock_to_etf)
-    hedge_weights = hedge_weights.reindex(columns=etf_returns.columns).fillna(0)
-    return backtest_core(weights, hedge_weights, stock_returns, etf_returns,
-                         initial_equity, slippage)
 
 
 # --- PCA helpers ---
@@ -506,18 +257,20 @@ def compute_pca_residuals(returns, eigen_dict, reg_window=60):
             residuals.loc[date_t, stock]  = returns.loc[date_t, stock] - fitted
     return residuals
 
-def backtest_pca_strategy(weights, returns, spy_returns,
+
+# sửa hedge theo FU
+def backtest_pca_strategy(weights, returns, fu_vn30_returns,
                            initial_equity=100, slippage=0.0005, beta_window=60):
-    spy_returns = spy_returns.squeeze()
+    fu_vn30_returns = fu_vn30_returns.squeeze()
     common      = (weights.index
                    .intersection(returns.index)
-                   .intersection(spy_returns.index))
+                   .intersection(fu_vn30_returns.index))
     weights     = weights.loc[common].fillna(0)
     returns     = returns.loc[common].fillna(0)
-    spy_returns = spy_returns.loc[common].fillna(0)
+    fu_vn30_returns = fu_vn30_returns.loc[common].fillna(0)
     stock_ret   = (weights * returns).sum(axis=1)
-    rolling_cov = stock_ret.rolling(beta_window).cov(spy_returns)
-    rolling_var = spy_returns.rolling(beta_window).var().replace(0, np.nan)
+    rolling_cov = stock_ret.rolling(beta_window).cov(fu_vn30_returns)
+    rolling_var = fu_vn30_returns.rolling(beta_window).var().replace(0, np.nan)
     beta_series = (rolling_cov / rolling_var).fillna(0).replace([np.inf, -np.inf], 0)
     w           = weights.fillna(0)
     bh          = beta_series.fillna(0)
@@ -528,7 +281,7 @@ def backtest_pca_strategy(weights, returns, spy_returns,
         Q_stock   = E * w.iloc[t]
         Q_spy     = -E * bh.iloc[t]
         pnl_stock = (Q_stock * returns.iloc[t]).sum()
-        pnl_spy   = Q_spy * spy_returns.iloc[t]
+        pnl_spy   = Q_spy * fu_vn30_returns.iloc[t]
         if t > 1:
             E_prev2      = equity.iloc[t - 2]
             Q_prev_stock = E_prev2 * w.iloc[t - 1]
@@ -590,70 +343,6 @@ def performance_report(equity_series):
     print(annual_sharpe)
     return annual_sharpe, total_sharpe
 
-
-# =============================================================================
-# 8. STRATEGY: SYNTHETIC ETFs
-# =============================================================================
-
-residuals_syn = compute_residuals_synthetic(
-    returns_filtered, sector_returns, ticker_to_etf, window=60)
-
-kappa_syn, mu_syn, sigma_eq_syn = fit_ou(residuals_syn, window=60)
-
-s_syn       = compute_s_score(residuals_syn, mu_syn, sigma_eq_syn, window=60)
-signals_syn = generate_signals(s_syn)
-weights_syn = construct_portfolio(signals_syn, leverage=2.0, max_positions=100)
-equity_syn  = backtest_synthetic(weights_syn, returns_filtered, spy_returns, window=60)
-
-print("=== Synthetic ETFs ===")
-print("Total Return:", total_return(equity_syn))
-print("\nAnnual Sharpe:")
-print(annual_sharpe_table(equity_syn))
-
-plt.figure()
-plt.plot(equity_syn)
-plt.title("Historical PnL of Strategy (Synthetic ETFs)")
-plt.xlabel("Date")
-plt.ylabel("Cumulative PnL (Base = 100)")
-plt.show()
-
-# =============================================================================
-# 9. STRATEGY: ACTUAL ETFs
-# =============================================================================
-
-residuals_act = compute_residuals_actual(
-    returns_filtered, etf_returns, ticker_to_etf, window=60)
-
-kappa_act, mu_act, sigma_eq_act = fit_ou(residuals_act, window=60)
-
-s_act       = compute_s_score(residuals_act, mu_act, sigma_eq_act, window=60)
-signals_act = generate_signals(s_act)
-weights_act = construct_portfolio(signals_act, leverage=2.0, max_positions=100)
-equity_act  = backtest_actual(weights_act, returns_filtered, etf_returns, ticker_to_etf)
-
-print("=== Actual ETFs ===")
-print("Total Return:", total_return(equity_act))
-print("\nAnnual Sharpe:")
-print(annual_sharpe_table(equity_act))
-
-plt.figure()
-plt.plot(equity_act)
-plt.title("Historical PnL of Strategy (Actual ETFs)")
-plt.xlabel("Date")
-plt.ylabel("Cumulative PnL (Base = 100)")
-plt.show()
-
-# --- Compare Synthetic vs Actual ---
-common_index = equity_syn.index.intersection(equity_act.index)
-plt.figure(figsize=(12, 6))
-plt.plot(equity_syn.loc[common_index], label="Synthetic ETFs")
-plt.plot(equity_act.loc[common_index], label="Actual ETFs")
-plt.title("Equity Curve Comparison")
-plt.xlabel("Date")
-plt.ylabel("Equity Value")
-plt.legend()
-plt.grid(True)
-plt.show()
 
 # =============================================================================
 # 10. STRATEGY: PCA FIXED (15 factors)

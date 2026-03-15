@@ -3,6 +3,8 @@
 # Statistical Arbitrage Backtest — 4 Strategies
 # =============================================================================
 
+from curses import window
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -19,29 +21,31 @@ print('Libraries loaded.')
 # =============================================================================
 
 # --- Stock prices ---
-stock_df = pd.read_csv('vietnam_stocks_price.csv', index_col= 0, parse_dates=True)
-print(f'Adj Close  shape: {stock_df.shape}')
-print(f'Date range: {stock_df.index.min().date()} -> {stock_df.index.max().date()}')
+prices_df = pd.read_csv('vietnam_stocks_price.csv', index_col= 0, parse_dates=True)
+print(f'Adj Close  shape: {prices_df.shape}')
+print(f'Date range: {prices_df.index.min().date()} -> {prices_df.index.max().date()}')
 
 # --- Stock volumes ---
 volume_df = pd.read_csv('vietnam_stocks_volume.csv', index_col= 0, parse_dates=True)
 print(f'Volume shape: {volume_df.shape}')
 
 # --- FU VN30 ---
-fu_price_df = pd.read_csv('fu_vn30_price.csv', index_col=0, parse_dates=True)
-print(f'FU VN30 shape: {fu_price_df.shape}')
+fu_df = pd.read_csv('fu_vn30_price.csv', index_col=0, parse_dates=True)
+print(f'FU VN30 shape: {fu_df.shape}')
 
 
 # =============================================================================
-# 7. HELPER FUNCTIONS
+# FUNCTIONS
 # =============================================================================
 
+
+# 1. Data preparation and universe selection
 # --- Choose trading universe ---
-def filter_universe(price_df, volume_df, date, top_n=300, window=366):
+def select_universe(prices_df: pd.DataFrame, volume_df: pd.DataFrame, date: pd.Timestamp, top_n=300, lookback_window=366):
     # filter stocks with price data on the given date
-    list_stocks_notna = price_df.loc[date].notna()
-    price = price_df.loc[(date - pd.Timedelta(days=window)):date, list_stocks_notna]
-    volume = volume_df.loc[(date - pd.Timedelta(days=window)):date, list_stocks_notna]
+    list_stocks_notna = prices_df.loc[date].notna()
+    price = prices_df.loc[(date - pd.Timedelta(days=lookback_window)):date, list_stocks_notna]
+    volume = volume_df.loc[(date - pd.Timedelta(days=lookback_window)):date, list_stocks_notna]
     
     # take top N stocks by liquidity 
     liquidity = volume.iloc[-1]
@@ -56,22 +60,119 @@ def filter_universe(price_df, volume_df, date, top_n=300, window=366):
     volume_top_liquidity = volume_top_liquidity[columns]
     volume_top_liquidity = volume_top_liquidity.ffill(limit=5)
     
-    return top_liquidity, volume_top_liquidity
+    return top_liquidity, volume_top_liquidity.astype(float)
 
 # --- Returns calculation ---
-def compute_returns(price_df):
-    return price_df.pct_change().dropna()
+def compute_returns(price_df: pd.DataFrame, volume_df: pd.DataFrame=None, with_volume=False, volume_average_window=10):
+    # basic returns calculation
+    returns = price_df.pct_change().dropna()
 
-# --- Returns calculation with taking volume into account ---
+    # volume adjustment
+    if with_volume and volume_df is not None:
+        volume_average = volume_df.shift(1).rolling(volume_average_window).mean().dropna() # volume average based on previous day
+        volume_average = volume_average.reindex(returns.index) 
+        delta_volume = volume_average.diff().dropna() 
+        returns = returns*(volume_average/delta_volume)
+    return returns.dropna()
+# ----------------------------------------------------------------------------
 
+# 2. PCA and factor modeling
+# --- Standardize returns ---
+def standardize_returns(returns_df: pd.DataFrame):
+    mean_i = returns_df.mean(axis=0)
+    std_i  = returns_df.std(axis=0, ddof=1).replace(0, np.nan)
+    standardized = (returns_df - mean_i) / std_i
+    return standardized.dropna(axis=1)
 
+# --- Empirical correlation ---
+def compute_empirical_correlation(standardized_returns: pd.DataFrame):
+    M = standardized_returns.shape[0]
+    return (standardized_returns.values.T @ standardized_returns.values) / (M - 1)
 
+# --- Eigen decomposition sorted ---
+def eigen_decomposition_sorted(corr_matrix: np.ndarray):
+    eigvals, eigvecs = np.linalg.eigh(corr_matrix)
+    idx = np.argsort(eigvals)[::-1]
+    return eigvals[idx], eigvecs[:, idx]
 
+# --- PCA engine ---
+def window_pca_engine(returns_df: pd.DataFrame, fixed_factors=False, n_factors=15, variance_cutoff=0.55):
+    # initialize outputs
+    pca_dict = {}
+    k_series   = {}
+    # compute standard deviation for each stock
+    std_stocks = returns_df.std(ddof=1).replace(0, np.nan)
 
+    # compute PCA
+    Z = standardize_returns(returns_df)
+    C = compute_empirical_correlation(Z)
+    eigvals, eigvecs = eigen_decomposition_sorted(C)
 
+    # determine number of factors 
+    if fixed_factors:
+        k = min(n_factors, returns_df.shape[1] - 1)
+    else:
+        cumvar = np.cumsum(eigvals) / eigvals.sum()
+        k      = int(np.searchsorted(cumvar, variance_cutoff)) + 1
+        k      = min(k, returns_df.shape[1] - 1)
+
+    # compute eigenportfolios
+    V     = eigvecs[:, :k]
+    Q     = V / std_stocks.values.reshape(-1, 1)
+    
+    # return results
+    pca_dict = {"Q": Q, "V": V, "k": k, "stocks": returns_df.columns, "eigenvalues": eigvals[:k]}
+    if fixed_factors:
+        return pca_dict
+    else:
+        return pca_dict, pd.Series(k_series)
+# ----------------------------------------------------------------------------
+
+# 3. Model regression and residuals
+# --- Compute PCA residuals ---
+def compute_pca_residuals(returns_df: pd.DataFrame, pca_dict: dict, window=60):
+    # take last 'window' returns for regression
+    returns_win = returns_df.iloc[-window:]
+
+    Q = pca_dict["Q"]
+    stocks = pca_dict["stocks"]
+
+    # check stocks match
+    if list(stocks) != list(returns_df.columns):
+        raise ValueError("PCA stocks do not match returns stocks")
+
+    # matrix returns
+    R = returns_win[stocks].values     # (window × N)
+
+    # factor returns
+    F = R @ Q                                    # (window × k)
+
+    # design matrix with intercept
+    X = np.column_stack([np.ones(window), F])     # (window × (k+1))
+
+    # OLS solution
+    XtX_inv = np.linalg.pinv(X.T @ X)
+    B = XtX_inv @ (X.T @ R)                       # ((k+1) × N)
+
+    # fitted returns
+    fitted = X @ B                                # (window × N)
+
+    # residuals
+    residuals = R - fitted
+
+    # convert to DataFrame
+    residuals_df = pd.DataFrame(
+        residuals,
+        index=returns_win.index,
+        columns=stocks
+    )
+
+    return residuals_df    
+
+    
 # --- OU fitting ---
 # sửa lại thêm case không limit kappa 
-def fit_ou(residuals, window=60, limit = False, kappa_min=8.4):
+def fit_ou(residuals: pd.DataFrame, window=60, limit = False, kappa_min=8.4):
     kappa    = pd.DataFrame(index=residuals.index, columns=residuals.columns, dtype=float)
     mu       = kappa.copy()
     sigma_eq = kappa.copy()
@@ -177,85 +278,6 @@ def construct_portfolio(signals, leverage=2.0, max_positions=100):
         current_weights   = new_weights
     return weights
 
-
-# --- PCA helpers ---
-def standardize_window(window_data):
-    mean_i = window_data.mean(axis=0)
-    std_i  = window_data.std(axis=0, ddof=1).replace(0, np.nan)
-    Y      = (window_data - mean_i) / std_i
-    return Y.dropna(axis=1)
-
-def compute_empirical_correlation(Y):
-    M = Y.shape[0]
-    return (Y.values.T @ Y.values) / (M - 1)
-
-def eigen_decomposition_sorted(corr):
-    eigvals, eigvecs = np.linalg.eigh(corr)
-    idx = np.argsort(eigvals)[::-1]
-    return eigvals[idx], eigvecs[:, idx]
-
-def rolling_pca_engine(returns, window=252, mode="fixed", n_factors=15, variance_cutoff=0.55):
-    dates      = returns.index
-    eigen_dict = {}
-    k_series   = {}
-    for t in range(window, len(dates)):
-        date_t      = dates[t]
-        window_data = returns.iloc[t - window + 1:t + 1].dropna(axis=1)
-        if window_data.shape[1] < 2:
-            continue
-        Y = standardize_window(window_data)
-        if Y.shape[1] < 2:
-            continue
-        stocks             = Y.columns
-        corr               = compute_empirical_correlation(Y)
-        eigvals, eigvecs   = eigen_decomposition_sorted(corr)
-        if mode == "fixed":
-            k = min(n_factors, len(stocks) - 1)
-        elif mode == "variable":
-            cumvar = np.cumsum(eigvals) / eigvals.sum()
-            k      = int(np.searchsorted(cumvar, variance_cutoff)) + 1
-            k      = min(k, len(stocks) - 1)
-            k_series[date_t] = k
-        else:
-            raise ValueError("mode must be 'fixed' or 'variable'")
-        V     = eigvecs[:, :k]
-        std_i = window_data[stocks].std(ddof=1).values
-        std_i[std_i == 0] = np.nan
-        Q = V / std_i.reshape(-1, 1)
-        eigen_dict[date_t] = {"Q": Q, "V": V, "k": k, "stocks": stocks, "std_i": std_i}
-    if mode == "fixed":
-        return eigen_dict
-    else:
-        return eigen_dict, pd.Series(k_series)
-
-def compute_pca_residuals(returns, eigen_dict, reg_window=60):
-    dates     = returns.index
-    residuals = pd.DataFrame(index=dates, columns=returns.columns, dtype=float)
-    for date_t in sorted(eigen_dict.keys()):
-        if date_t not in dates:
-            continue
-        t = dates.get_loc(date_t)
-        if t < reg_window:
-            continue
-        info      = eigen_dict[date_t]
-        Q         = info["Q"]
-        stocks    = info["stocks"]
-        reg_dates = dates[t - reg_window + 1:t + 1]
-        R_arr     = returns.loc[reg_dates, stocks].fillna(0).values
-        F_win     = R_arr @ Q
-        r_today   = returns.loc[date_t, stocks].fillna(0).values
-        f_today   = r_today @ Q
-        if np.isnan(f_today).any():
-            continue
-        X       = np.column_stack([np.ones(reg_window), F_win])
-        x_today = np.concatenate([[1.0], f_today])
-        XtX_inv = np.linalg.pinv(X.T @ X)
-        for i, stock in enumerate(stocks):
-            y                             = R_arr[:, i]
-            beta_full                     = XtX_inv @ (X.T @ y)
-            fitted                        = x_today @ beta_full
-            residuals.loc[date_t, stock]  = returns.loc[date_t, stock] - fitted
-    return residuals
 
 
 # sửa hedge theo FU

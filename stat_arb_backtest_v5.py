@@ -75,11 +75,12 @@ def fill_na_with_2before_2after(df: pd.DataFrame, min_neighbors=1, require_all=F
     return df.where(df.notna(), fill_values)
 
 # --- Universe selection based on liquidity ---
-def select_universe(prices_df: pd.DataFrame, volume_df: pd.DataFrame, date: pd.Timestamp, top_n=300, lookback_window=366):
+def select_universe(prices_df: pd.DataFrame, volume_df: pd.DataFrame, date: pd.Timestamp, top_n=300, lookback_window=252):
     # filter stocks with price data on the given date
-    list_stocks_notna_today = prices_df.loc[date].notna()
-    price = prices_df.loc[(date - pd.Timedelta(days=lookback_window)):date, list_stocks_notna_today]
-    volume = volume_df.loc[(date - pd.Timedelta(days=lookback_window)):date, list_stocks_notna_today]
+    index_date = prices_df.index.get_loc(date)
+    list_stocks_notna_today = prices_df.columns[prices_df.loc[date].notna()]
+    price = prices_df[list_stocks_notna_today].iloc[(index_date - lookback_window+1):(index_date + 1)]
+    volume = volume_df[list_stocks_notna_today].iloc[(index_date - lookback_window+1):(index_date + 1)]
 
     # common columns
     common_columns = price.columns.intersection(volume.columns)
@@ -134,36 +135,55 @@ def eigen_decomposition_sorted(corr_matrix: np.ndarray):
     return eigvals[idx], eigvecs[:, idx]
 
 # --- PCA engine ---
-def window_pca_engine(returns_df: pd.DataFrame, fixed_factors=False, n_factors=15, variance_cutoff=0.55):
-    # initialize outputs
-    pca_dict = {}
-    k_series   = {}
-    # compute standard deviation for each stock
-    std_stocks = returns_df.std(ddof=1).replace(0, np.nan)
+import numpy as np
+import pandas as pd
 
-    # compute PCA
+def window_pca_engine(
+    returns_df: pd.DataFrame,
+    fixed_factors: bool = False,
+    n_factors: int = 15,
+    variance_cutoff: float = 0.55
+):
+    if returns_df.shape[1] < 2:
+        raise ValueError("returns_df must contain at least 2 stocks")
+
+    # độ lệch chuẩn từng cổ phiếu
+    std_stocks = returns_df.std(ddof=1)
+
+    # loại các cột có std = 0 hoặc NaN
+    valid_cols = std_stocks[(std_stocks > 0) & std_stocks.notna()].index
+    returns_df = returns_df[valid_cols]
+    std_stocks = std_stocks[valid_cols]
+
+    if returns_df.shape[1] < 2:
+        raise ValueError("Not enough valid stocks after removing zero-variance columns")
+
+    # PCA
     Z = standardize_returns(returns_df)
     C = compute_empirical_correlation(Z)
     eigvals, eigvecs = eigen_decomposition_sorted(C)
 
-    # determine number of factors 
+    # chọn số factor
     if fixed_factors:
         k = min(n_factors, returns_df.shape[1] - 1)
     else:
         cumvar = np.cumsum(eigvals) / eigvals.sum()
-        k      = int(np.searchsorted(cumvar, variance_cutoff)) + 1
-        k      = min(k, returns_df.shape[1] - 1)
+        k = int(np.searchsorted(cumvar, variance_cutoff)) + 1
+        k = min(k, returns_df.shape[1] - 1)
 
-    # compute eigenportfolios
-    V     = eigvecs[:, :k]
-    Q     = V / std_stocks.values.reshape(-1, 1)
-    
-    # return results
-    pca_dict = {"Q": Q, "V": V, "k": k, "stocks": returns_df.columns, "eigenvalues": eigvals[:k]}
-    if fixed_factors:
-        return pca_dict
-    else:
-        return pca_dict, pd.Series(k_series)
+    # eigenportfolios
+    V = eigvecs[:, :k]
+    Q = V / std_stocks.to_numpy().reshape(-1, 1)
+
+    pca_dict = {
+        "Q": Q,                           # quantity of stocks in each factor
+        "V": V,                           # eigenvectors                                              
+        "k": k,                           # number of factors
+        "stocks": returns_df.columns,     # stock names
+        "eigenvalues": eigvals[:k],       # eigenvalues of selected factors
+    }
+
+    return pca_dict
 # ----------------------------------------------------------------------------
 
 # 3. Model regression and residuals
@@ -205,7 +225,7 @@ def compute_pca_residuals(returns_df: pd.DataFrame, pca_dict: dict, window=60):
         columns=stocks
     )
 
-    return residuals_df    
+    return residuals_df      
 
     
 # --- OU fitting ---

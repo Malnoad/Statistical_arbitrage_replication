@@ -40,27 +40,66 @@ print(f'FU VN30 shape: {fu_df.shape}')
 
 
 # 1. Data preparation and universe selection
-# --- Choose trading universe ---
+# --- Function to select stocks with highest liquidity ---
+def top_liquidity_stocks(price_df, volume_df, top_n=300, average_window=60):
+    # Calculate liquidity metrics (average volume* price over lookback window)
+    price_win = price_df.tail(average_window)
+    volume_win = volume_df.tail(average_window)
+
+    liquidity = (price_win * volume_win).mean()
+    top_stocks = liquidity.nlargest(min(top_n, len(liquidity))).index
+
+    return price_df[top_stocks], volume_df[top_stocks].astype(float)
+
+# --- Fill missing values with average of 2 before and 2 after ---
+def fill_na_with_2before_2after(df: pd.DataFrame, min_neighbors=1, require_all=False):
+    s1 = df.shift(1)
+    s2 = df.shift(2)
+    s_1 = df.shift(-1)
+    s_2 = df.shift(-2)
+
+    neighbor_sum = s1.fillna(0) + s2.fillna(0) + s_1.fillna(0) + s_2.fillna(0)
+    neighbor_count = (
+        s1.notna().astype(int)
+        + s2.notna().astype(int)
+        + s_1.notna().astype(int)
+        + s_2.notna().astype(int)
+    )
+
+    neighbor_mean = neighbor_sum / neighbor_count.where(neighbor_count > 0)
+
+    if require_all:
+        fill_values = neighbor_mean.where(neighbor_count == 4)
+    else:
+        fill_values = neighbor_mean.where(neighbor_count >= min_neighbors)
+
+    return df.where(df.notna(), fill_values)
+
+# --- Universe selection based on liquidity ---
 def select_universe(prices_df: pd.DataFrame, volume_df: pd.DataFrame, date: pd.Timestamp, top_n=300, lookback_window=366):
     # filter stocks with price data on the given date
-    list_stocks_notna = prices_df.loc[date].notna()
-    price = prices_df.loc[(date - pd.Timedelta(days=lookback_window)):date, list_stocks_notna]
-    volume = volume_df.loc[(date - pd.Timedelta(days=lookback_window)):date, list_stocks_notna]
-    
-    # take top N stocks by liquidity 
-    liquidity = volume.iloc[-1]
-    list_top_liquidity = liquidity.nlargest(top_n).index.tolist()
-    top_liquidity = price[list_top_liquidity]
-    volume_top_liquidity = volume[list_top_liquidity]
+    list_stocks_notna_today = prices_df.loc[date].notna()
+    price = prices_df.loc[(date - pd.Timedelta(days=lookback_window)):date, list_stocks_notna_today]
+    volume = volume_df.loc[(date - pd.Timedelta(days=lookback_window)):date, list_stocks_notna_today]
 
-    # handle missing values by forward fill then drop na 
-    top_liquidity = top_liquidity.ffill(limit=2)
-    top_liquidity = top_liquidity.dropna(axis=1, how='any')
-    columns = top_liquidity.columns
-    volume_top_liquidity = volume_top_liquidity[columns]
-    volume_top_liquidity = volume_top_liquidity.ffill(limit=5)
+    # common columns
+    common_columns = price.columns.intersection(volume.columns)
+    price = price[common_columns]
+    volume = volume[common_columns]
+
+    # handle missing values by forward fill then drop na
+    price = price.ffill(limit=2)
+    price = price.dropna(axis=1, how='any')
+    columns = price.columns
+    volume = volume[columns]
+    # fill volume missing values with average of previous and next valid values
+    volume = fill_na_with_2before_2after(volume, min_neighbors=1, require_all=False)
+    volume = volume.dropna(axis=1, how='any')
+    columns = volume.columns
+    price = price[columns]
     
-    return top_liquidity, volume_top_liquidity.astype(float)
+    # return price and volume for the top N stocks by liquidity
+    return top_liquidity_stocks(price, volume, top_n=top_n, average_window=lookback_window)
 
 # --- Returns calculation ---
 def compute_returns(price_df: pd.DataFrame, volume_df: pd.DataFrame=None, with_volume=False, volume_average_window=10):

@@ -9,7 +9,6 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import statsmodels.api as sm
 
 START_DATE = '2018-01-02'
 END_DATE   = '2025-12-31'
@@ -211,62 +210,100 @@ def compute_pca_residuals(returns_df: pd.DataFrame, pca_dict: dict, window=60):
     
 # --- OU fitting ---
 # sửa lại thêm case không limit kappa 
-def fit_ou(residuals: pd.DataFrame, window=60, limit = False, kappa_min=8.4):
-    kappa    = pd.DataFrame(index=residuals.index, columns=residuals.columns, dtype=float)
-    mu       = kappa.copy()
+def fit_ou_model(
+    residuals,
+    window=60,
+    limit=False,
+    kappa_min=8.4,
+    min_obs=40,
+    return_details=True
+ ):
+    kappa = pd.DataFrame(index=residuals.index, columns=residuals.columns, dtype=float)
+    mu = kappa.copy()
     sigma_eq = kappa.copy()
-    for t in range(window, len(residuals)):
-        date       = residuals.index[t]
-        eps_window = residuals.iloc[t - window + 1:t + 1]
-        for ticker in residuals.columns:
-            eps = eps_window[ticker].dropna().values
-            if len(eps) < window:
-                continue
-            x     = np.cumsum(eps)
-            x_lag = x[:-1]
-            x_now = x[1:]
-            if len(x_lag) < 2:
-                continue
-            x_lag_mean = x_lag.mean()
-            x_now_mean = x_now.mean()
-            num   = np.sum((x_lag - x_lag_mean) * (x_now - x_now_mean))
-            denom = np.sum((x_lag - x_lag_mean) ** 2)
-            if denom <= 1e-12:
-                continue
-            b = num / denom
-            if b <= 0 or b >= 1:
-                continue
-            k_annual = -np.log(b) * 252
-            if k_annual < kappa_min:
-                continue
-            a        = x_now_mean - b * x_lag_mean
-            m        = a / (1 - b)
-            zeta     = x_now - (a + b * x_lag)
-            var_zeta = np.var(zeta, ddof=1)
-            if var_zeta <= 1e-12:
-                continue
-            kappa.loc[date, ticker]    = k_annual
-            mu.loc[date, ticker]       = m
-            sigma_eq.loc[date, ticker] = np.sqrt(var_zeta / (1 - b ** 2))
-        valid = mu.loc[date].notna()
-        if valid.any():
-            mu.loc[date, valid] -= mu.loc[date, valid].mean()
-    return kappa, mu, sigma_eq
 
+    for col in residuals.columns:
+        series = residuals[col]
+
+        for t in range(window, len(series)):
+            eps_win = series.iloc[t - window:t].dropna()
+
+            if len(eps_win) < min_obs:
+                continue
+
+            Xcum = eps_win.cumsum().values
+            if len(Xcum) < 3:
+                continue
+
+            x_prev = Xcum[:-1]
+            x_next = Xcum[1:]
+
+            A = np.column_stack([np.ones(len(x_prev)), x_prev])
+
+            try:
+                a, b = np.linalg.lstsq(A, x_next, rcond=None)[0]
+            except np.linalg.LinAlgError:
+                continue
+
+            resid_ar = x_next - (a + b * x_prev)
+            var_xi = np.var(resid_ar, ddof=1)
+
+            if not np.isfinite(b) or not np.isfinite(var_xi):
+                continue
+            if var_xi <= 1e-12:
+                continue
+            if b <= 0 or b >= 0.9672:
+                continue
+
+            kappa_val = -np.log(b) * 252.0
+            mu_val = a / (1.0 - b)
+            sigma_eq_val = np.sqrt(var_xi / (1.0 - b**2))
+
+            if not np.isfinite(kappa_val) or not np.isfinite(mu_val) or not np.isfinite(sigma_eq_val):
+                continue
+            if sigma_eq_val <= 1e-12:
+                continue
+            if limit and kappa_val < kappa_min:
+                continue
+
+            date = series.index[t]
+            kappa.loc[date, col] = kappa_val
+            mu.loc[date, col] = mu_val
+            sigma_eq.loc[date, col] = sigma_eq_val
+
+    # Combined daily dataframe: rows=days, columns=(Stock, Stat)
+    # Example columns: ('AAA', 'kappa'), ('AAA', 'mu'), ('AAA', 'sigma_eq')
+    ou_daily_df = pd.concat({'kappa': kappa, 'mu': mu, 'sigma_eq': sigma_eq}, axis=1)
+    ou_daily_df = ou_daily_df.swaplevel(0, 1, axis=1).sort_index(axis=1, level=0)
+    ou_daily_df.columns.names = ['Stock', 'Stat']
+
+    if return_details:
+        return ou_daily_df, kappa, mu, sigma_eq
+    return ou_daily_df
 
 # --- S-score ---
 # thêm hàm vẽ phân phối 
-def compute_s_score(residuals, mu, sigma_eq, window=60):
-    s = pd.DataFrame(index=residuals.index, columns=residuals.columns, dtype=float)
-    for t in range(window, len(residuals)):
-        date       = residuals.index[t]
-        eps_window = residuals.iloc[t - window + 1:t + 1]
-        X_t        = eps_window.cumsum().iloc[-1]
-        m          = mu.loc[date]
-        sig        = sigma_eq.loc[date]
-        valid      = m.notna() & sig.notna() & X_t.notna() & (sig > 1e-12)
-        s.loc[date, valid] = (X_t[valid] - m[valid]) / sig[valid]
-    return s
+def compute_s_score(residuals, mu, sigma_eq, window=60, min_obs=40):
+    sscore_df = pd.DataFrame(index=residuals.index, columns=residuals.columns, dtype=float)
+
+    for col in residuals.columns:
+        eps = residuals[col]
+
+        for t in range(window, len(eps)):
+            eps_win = eps.iloc[t - window:t].dropna()
+            if len(eps_win) < min_obs:
+                continue
+
+            x_t = eps_win.cumsum().iloc[-1]
+            mu_t = mu.iloc[t, mu.columns.get_loc(col)]
+            sigma_t = sigma_eq.iloc[t, sigma_eq.columns.get_loc(col)]
+
+            if pd.isna(mu_t) or pd.isna(sigma_t) or sigma_t <= 1e-12:
+                continue
+
+            sscore_df.iloc[t, sscore_df.columns.get_loc(col)] = (x_t - mu_t) / sigma_t
+
+    return sscore_df
 
 
 # --- Signal generation ---

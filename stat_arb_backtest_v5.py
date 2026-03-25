@@ -10,8 +10,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-START_DATE = '2018-01-02'
-END_DATE   = '2025-12-31'
 
 print('Libraries loaded.')
 
